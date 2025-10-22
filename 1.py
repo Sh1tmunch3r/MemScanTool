@@ -2262,6 +2262,7 @@ class MemScanDeluxeUI:
         
         # UI state variables
         self.process_list = []
+        self.process_filter = ""
         self.current_region_filter = ""
         self.scan_value = ""
         self.scan_data_type = ScanDataType.INTEGER
@@ -2768,6 +2769,10 @@ class MemScanDeluxeUI:
         try:
             for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'exe']):
                 try:
+                    # Skip processes without valid PID
+                    if proc.pid is None:
+                        continue
+                    
                     # Skip system processes if not showing them
                     if not self.config.show_system_processes:
                         if proc.pid < 100 or proc.name().lower() in [
@@ -2776,18 +2781,25 @@ class MemScanDeluxeUI:
                         ]:
                             continue
                     
+                    # Build process info with defensive checks
                     process_info = {
                         'pid': proc.pid,
-                        'name': proc.name(),
+                        'name': proc.name() if hasattr(proc, 'name') else f'Process {proc.pid}',
                         'memory': proc.memory_info().rss if hasattr(proc, 'memory_info') else 0,
                         'path': proc.exe() if hasattr(proc, 'exe') else ""
                     }
-                    self.process_list.append(process_info)
+                    
+                    # Final validation before adding
+                    if process_info['pid'] is not None and isinstance(process_info['pid'], int) and process_info['pid'] > 0:
+                        self.process_list.append(process_info)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
+                except Exception as e:
+                    # Log unexpected errors but continue
+                    self.memory_manager.logger.warning(f"Error processing process: {e}")
             
             # Sort by name
-            self.process_list.sort(key=lambda p: p['name'].lower())
+            self.process_list.sort(key=lambda p: p.get('name', '').lower())
             
             # Update the table
             self.update_process_table()
@@ -2796,6 +2808,8 @@ class MemScanDeluxeUI:
             
         except Exception as e:
             self.show_error(f"Error refreshing process list: {e}")
+            # Ensure we have an empty list on error
+            self.process_list = []
     
     def update_process_table(self) -> None:
         """Update the process table with current process list."""
@@ -2808,18 +2822,34 @@ class MemScanDeluxeUI:
         else:
             return
         
+        # Apply filter if set
+        filtered_list = self.process_list
+        if self.process_filter:
+            filtered_list = [
+                proc for proc in self.process_list
+                if self.process_filter in proc.get('name', '').lower() or 
+                   self.process_filter in str(proc.get('pid', '')) or 
+                   self.process_filter in proc.get('path', '').lower()
+            ]
+        
         # Add rows for each process
-        for i, proc in enumerate(self.process_list):
+        for i, proc in enumerate(filtered_list):
+            # Validate process has required keys
+            if 'pid' not in proc or proc['pid'] is None:
+                continue
+            if 'name' not in proc:
+                continue
+            
             with dpg.table_row(parent="process_table"):
                 dpg.add_text(f"{proc['pid']}")
                 dpg.add_text(proc['name'])
                 
                 # Format memory size
-                memory_mb = proc['memory'] / (1024 * 1024)
+                memory_mb = proc.get('memory', 0) / (1024 * 1024)
                 dpg.add_text(f"{memory_mb:.1f} MB")
                 
                 # Path (truncated if needed)
-                path = proc['path']
+                path = proc.get('path', '')
                 if len(path) > 40:
                     path = "..." + path[-37:]
                 dpg.add_text(path)
@@ -2855,6 +2885,11 @@ class MemScanDeluxeUI:
     
     def _do_attach_process(self, pid: int) -> None:
         """Actually perform the process attachment."""
+        # Double-check PID validity (defense in depth)
+        if pid is None or not isinstance(pid, int) or pid <= 0:
+            self.show_error(f"Invalid PID in attach operation: {pid}")
+            return
+        
         # Reset state
         self.memory_manager.scan_results = []
         self.memory_manager.previous_scan_results = []
@@ -2901,8 +2936,21 @@ class MemScanDeluxeUI:
     
     def show_process_info(self, process: Dict[str, Any]) -> None:
         """Show detailed information about a process."""
+        # Validate process dictionary has required keys
+        if not process or not isinstance(process, dict):
+            self.show_error("Invalid process data")
+            return
+        
+        if 'pid' not in process or process['pid'] is None:
+            self.show_error("Invalid process: missing or invalid PID")
+            return
+        
+        if 'name' not in process:
+            self.show_error("Invalid process: missing name")
+            return
+        
         info_text = f"Process: {process['name']} (PID: {process['pid']})\n"
-        info_text += f"Path: {process['path']}\n"
+        info_text += f"Path: {process.get('path', 'N/A')}\n"
         
         # Try to get more info with psutil
         if _have_psutil:
@@ -2953,15 +3001,15 @@ class MemScanDeluxeUI:
         
         # Show the information in a modal window
         with dpg.window(label=f"Process Info - {process['name']}", modal=True, 
-                       width=600, height=400, pos=(100, 100)):
+                       width=600, height=400, pos=(100, 100), tag=f"process_info_{process['pid']}"):
             dpg.add_text(info_text, wrap=580)
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Attach", callback=lambda s, a, pid=process['pid']: [
                     self.attach_to_process(pid), 
-                    dpg.delete_item(dpg.get_item_parent(s))
+                    dpg.delete_item(f"process_info_{pid}")
                 ])
-                dpg.add_button(label="Close", callback=lambda: dpg.delete_item(dpg.get_item_parent(dpg.last_container())))
+                dpg.add_button(label="Close", callback=lambda s, a, pid=process['pid']: dpg.delete_item(f"process_info_{pid}"))
     
     def toggle_show_system(self, sender, value) -> None:
         """Toggle showing system processes."""
@@ -2970,8 +3018,8 @@ class MemScanDeluxeUI:
     
     def filter_process_list(self, sender, value) -> None:
         """Filter the process list based on search text."""
-        # This would filter the displayed processes without refreshing the list
-        pass
+        self.process_filter = value.lower().strip() if value else ""
+        self.update_process_table()
     
     def start_first_scan(self) -> None:
         """Start initial memory scan."""
@@ -3496,10 +3544,11 @@ class MemScanDeluxeUI:
     # Utility methods
     def show_error(self, message: str) -> None:
         """Show an error message dialog."""
-        with dpg.window(label="Error", modal=True, width=400, height=150, pos=(400, 300)):
+        error_tag = f"error_dialog_{id(message)}"
+        with dpg.window(label="Error", modal=True, width=400, height=150, pos=(400, 300), tag=error_tag):
             dpg.add_text(message, wrap=380)
             dpg.add_separator()
-            dpg.add_button(label="OK", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+            dpg.add_button(label="OK", callback=lambda: dpg.delete_item(error_tag) if dpg.does_item_exist(error_tag) else None, width=80)
     
     def show_about(self) -> None:
         """Show about dialog."""
@@ -3524,10 +3573,10 @@ Requirements:
 - capstone (optional)
 - keystone-engine (optional)
 """
-        with dpg.window(label="About MemScan Deluxe", modal=True, width=500, height=400, pos=(350, 200)):
+        with dpg.window(label="About MemScan Deluxe", modal=True, width=500, height=400, pos=(350, 200), tag="about_dialog"):
             dpg.add_text(about_text, wrap=480)
             dpg.add_separator()
-            dpg.add_button(label="Close", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+            dpg.add_button(label="Close", callback=lambda: dpg.delete_item("about_dialog") if dpg.does_item_exist("about_dialog") else None, width=80)
     
     def show_docs(self) -> None:
         """Show documentation."""
@@ -3556,14 +3605,14 @@ Keyboard Shortcuts:
 - Ctrl+F: Start scan (when implemented)
 - Ctrl+Space: Toggle freeze (when implemented)
 """
-        with dpg.window(label="Documentation", modal=True, width=600, height=500, pos=(300, 150)):
+        with dpg.window(label="Documentation", modal=True, width=600, height=500, pos=(300, 150), tag="docs_dialog"):
             dpg.add_text(docs_text, wrap=580)
             dpg.add_separator()
-            dpg.add_button(label="Close", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+            dpg.add_button(label="Close", callback=lambda: dpg.delete_item("docs_dialog") if dpg.does_item_exist("docs_dialog") else None, width=80)
     
     def show_scan_settings(self) -> None:
         """Show scan settings dialog."""
-        with dpg.window(label="Scan Settings", modal=True, width=500, height=400, pos=(350, 200)):
+        with dpg.window(label="Scan Settings", modal=True, width=500, height=400, pos=(350, 200), tag="scan_settings_dialog"):
             dpg.add_slider_int(label="Scan Threads", default_value=self.config.scan_threads, 
                              min_value=1, max_value=16, tag="settings_scan_threads")
             dpg.add_combo(label="Anti-Detection Level", 
@@ -3575,18 +3624,19 @@ Keyboard Shortcuts:
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Save", callback=self._save_scan_settings, width=80)
-                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("scan_settings_dialog") if dpg.does_item_exist("scan_settings_dialog") else None, width=80)
     
     def _save_scan_settings(self) -> None:
         """Save scan settings."""
         self.config.scan_threads = dpg.get_value("settings_scan_threads")
         self.config.anti_detection_level = DetectionLevel[dpg.get_value("settings_detection_level")]
         self.config.max_scan_results = dpg.get_value("settings_max_results")
-        dpg.delete_item(dpg.last_container())
+        if dpg.does_item_exist("scan_settings_dialog"):
+            dpg.delete_item("scan_settings_dialog")
     
     def show_options(self) -> None:
         """Show options dialog."""
-        with dpg.window(label="Options", modal=True, width=500, height=400, pos=(350, 200)):
+        with dpg.window(label="Options", modal=True, width=500, height=400, pos=(350, 200), tag="options_dialog"):
             dpg.add_checkbox(label="Use Dark Theme", default_value=self.config.use_dark_theme)
             dpg.add_checkbox(label="Show System Processes", default_value=self.config.show_system_processes)
             dpg.add_checkbox(label="Enable GPU Acceleration", default_value=self.config.enable_gpu_acceleration)
@@ -3594,8 +3644,8 @@ Keyboard Shortcuts:
                                min_value=0.1, max_value=5.0)
             dpg.add_separator()
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Save", callback=lambda: [self.save_config(), dpg.delete_item(dpg.last_container())], width=80)
-                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+                dpg.add_button(label="Save", callback=lambda: [self.save_config(), dpg.delete_item("options_dialog") if dpg.does_item_exist("options_dialog") else None], width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("options_dialog") if dpg.does_item_exist("options_dialog") else None, width=80)
     
     def show_process_selector(self) -> None:
         """Show process selector dialog."""
@@ -3634,12 +3684,15 @@ Keyboard Shortcuts:
     
     def confirm_action(self, message: str, callback) -> None:
         """Show confirmation dialog."""
-        with dpg.window(label="Confirm", modal=True, width=400, height=150, pos=(400, 300)):
+        # Generate unique tag for this dialog
+        dialog_tag = f"confirm_dialog_{id(callback)}"
+        
+        with dpg.window(label="Confirm", modal=True, width=400, height=150, pos=(400, 300), tag=dialog_tag):
             dpg.add_text(message, wrap=380)
             dpg.add_separator()
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Yes", callback=lambda: [callback(), dpg.delete_item(dpg.last_container())], width=80)
-                dpg.add_button(label="No", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+                dpg.add_button(label="Yes", callback=lambda: [callback(), dpg.delete_item(dialog_tag) if dpg.does_item_exist(dialog_tag) else None], width=80)
+                dpg.add_button(label="No", callback=lambda: dpg.delete_item(dialog_tag) if dpg.does_item_exist(dialog_tag) else None, width=80)
 
 
 # =============================================================
