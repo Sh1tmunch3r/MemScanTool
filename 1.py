@@ -17,6 +17,14 @@ Features:
 - GPU-accelerated pattern matching
 - Multi-threaded scanning for performance
 
+Admin Elevation (Windows):
+- On Windows, the application automatically checks if it's running with
+  administrator privileges using ctypes.windll.shell32.IsUserAnAdmin()
+- If not elevated, it will prompt the user and attempt to relaunch itself
+  with admin privileges using ShellExecuteW
+- This is necessary to access memory of most processes
+- On non-Windows platforms, this check is skipped
+
 Requirements:
 - pip install dearpygui pywin32 numpy psutil pefile capstone keystone-engine frida
 """
@@ -2823,6 +2831,19 @@ class MemScanDeluxeUI:
     
     def attach_to_process(self, pid: int) -> None:
         """Attach to a process by PID."""
+        # Validate PID before attempting to attach
+        if pid is None:
+            self.show_error("Invalid PID: Process ID cannot be None. Please select a valid process.")
+            return
+        
+        if not isinstance(pid, int):
+            self.show_error(f"Invalid PID: Expected integer, got {type(pid).__name__}. Please select a valid process.")
+            return
+        
+        if pid <= 0:
+            self.show_error(f"Invalid PID: Process ID must be positive (got {pid}). Please select a valid process.")
+            return
+        
         if self.memory_manager.target.is_valid():
             # Ask confirmation to detach from current process
             self.confirm_action(
@@ -3624,6 +3645,71 @@ Keyboard Shortcuts:
 # =============================================================
 # Main Entry Point
 # =============================================================
+def check_and_elevate_admin():
+    """
+    Check if running with admin privileges on Windows.
+    If not, attempt to relaunch with elevation.
+    Returns True if we should continue, False if we relaunched.
+    """
+    # Only check on Windows
+    if not sys.platform.startswith('win'):
+        return True
+    
+    try:
+        # Check if running as administrator
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+        
+        if not is_admin:
+            print("Not running with administrator privileges.")
+            print("Attempting to relaunch with elevation...")
+            
+            # Get the script path and python executable
+            script_path = os.path.abspath(sys.argv[0])
+            
+            # Use ShellExecuteW to relaunch with admin privileges
+            # Parameters: hwnd, operation, file, parameters, directory, show_cmd
+            try:
+                # Build command line arguments
+                params = ' '.join([f'"{arg}"' for arg in sys.argv[1:]])
+                
+                # Execute with elevation
+                result = ctypes.windll.shell32.ShellExecuteW(
+                    None,           # hwnd
+                    "runas",        # operation (run as admin)
+                    sys.executable, # file (python executable)
+                    f'"{script_path}" {params}',  # parameters
+                    None,           # directory
+                    1               # show command (SW_SHOWNORMAL)
+                )
+                
+                # ShellExecuteW returns a value > 32 on success
+                if result > 32:
+                    print("Successfully relaunched with admin privileges.")
+                    print("Exiting this instance...")
+                    return False  # Exit this instance
+                else:
+                    print(f"Failed to elevate privileges (error code: {result}).")
+                    print("Continuing without admin privileges - some features may not work.")
+                    print()
+                    return True
+                    
+            except Exception as e:
+                print(f"Error attempting to elevate privileges: {e}")
+                print("Continuing without admin privileges - some features may not work.")
+                print()
+                return True
+        else:
+            print("Running with administrator privileges.")
+            return True
+            
+    except AttributeError:
+        # Not on Windows or ctypes.windll not available
+        return True
+    except Exception as e:
+        print(f"Error checking admin status: {e}")
+        return True
+
+
 def main():
     """Main entry point for the application."""
     print(f"Starting {VIEWPORT_TITLE} v{VERSION}")
@@ -3664,20 +3750,16 @@ def main():
     
     # Check if running on Windows
     if not sys.platform.startswith('win'):
-        print("ERROR: This application requires Windows to function properly.")
-        print("Many features rely on Windows-specific APIs.")
-        return 1
+        print("WARNING: This application is designed for Windows.")
+        print("Many features rely on Windows-specific APIs and may not work.")
+        print("Continuing anyway...")
+        print()
     
-    # Check if running with admin privileges
-    try:
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-        if not is_admin:
-            print("WARNING: Not running with administrator privileges.")
-            print("Some processes may not be accessible.")
-            print("Consider running as administrator for full functionality.")
-            print()
-    except:
-        pass
+    # Check and elevate admin privileges if needed (Windows only)
+    if sys.platform.startswith('win'):
+        if not check_and_elevate_admin():
+            # We relaunched with elevation, exit this instance
+            return 0
     
     print("Starting GUI...")
     print()
