@@ -280,8 +280,7 @@ class TargetProcess:
     session_id: int = 0
     
     def is_valid(self) -> bool:
-        """Check if process handle is valid."""
-        return self.pid > 0 and self.handle != 0
+        return isinstance(self.pid, int) and self.pid > 0 and self.handle != 0
     
     def format_pid(self) -> str:
         """Format PID with name."""
@@ -469,13 +468,22 @@ class MemoryManager:
         if not _have_pywin32:
             self._last_error = "PyWin32 is required for process operations"
             return False
-        
+
+        # --- PID sanity check ---
+        if pid is None or not isinstance(pid, int) or pid <= 0:
+            self._last_error = f"Invalid PID: {pid}"
+            self.logger.error(f"Invalid PID passed to open_process: {pid}")
+            return False
+
         try:
             # Close previous handle if any
-            if self.target.handle:
-                win32api.CloseHandle(self.target.handle)
+            if getattr(self.target, "handle", None):
+                try:
+                    win32api.CloseHandle(self.target.handle)
+                except Exception as e:
+                    self.logger.warning(f"Error closing previous handle: {e}")
                 self.target = TargetProcess()
-            
+
             # Get process information using psutil
             if _have_psutil:
                 try:
@@ -485,13 +493,18 @@ class MemoryManager:
                     self.target.path = proc.exe()
                     self.target.start_time = proc.create_time()
                     self.target.memory_size = proc.memory_info().rss
-                    self.target.session_id = proc.sessionid()
+                    # session_id is not available in psutil, so use fallback (Windows only)
+                    self.target.session_id = getattr(proc, "session_id", lambda: 0)()
                 except psutil.NoSuchProcess:
                     self._last_error = f"Process with PID {pid} not found"
+                    self.logger.error(self._last_error)
                     return False
                 except psutil.AccessDenied:
                     self.logger.warning(f"Limited access to process {pid} information")
-            
+                except Exception as e:
+                    self.logger.warning(f"Error fetching process info for PID {pid}: {e}")
+                    self.target.session_id = 0  # fallback
+
             # Open process with all access
             try:
                 access = (
@@ -503,37 +516,39 @@ class MemoryManager:
                 self.target.handle = win32api.OpenProcess(access, False, pid)
             except Exception as e:
                 self._last_error = f"Failed to open process: {e}"
+                self.logger.error(self._last_error)
                 return False
-            
+
             # Check if process is 64-bit
             self.target.is_64bit = self._is_process_64bit(pid)
             self.target.architecture = "x64" if self.target.is_64bit else "x86"
-            
+
             # Get process modules
             self._refresh_process_modules()
-            
+
             # Find main module's base address
             if self.target.modules:
                 main_module = os.path.basename(self.target.path) if self.target.path else self.target.name
                 if main_module in self.target.modules:
                     self.target.base_address = self.target.modules[main_module][0]
-            
+
             # Check for elevated privileges
             if _have_psutil:
                 try:
                     self.target.is_elevated = self._check_if_elevated(pid)
-                except:
+                except Exception as e:
+                    self.logger.warning(f"Error checking elevation: {e}")
                     self.target.is_elevated = False
-            
+
             # Check for protection
             self.target.is_protected = self._check_if_protected(pid)
-            
+
             # Get memory regions
             self.refresh_memory_regions()
-            
+
             self.logger.info(f"Successfully opened process {self.target.name} (PID: {pid})")
             return True
-            
+
         except Exception as e:
             self._last_error = f"Error opening process: {e}"
             self.logger.error(f"Failed to open process {pid}: {e}")
@@ -2690,21 +2705,21 @@ class MemScanDeluxeUI:
                 process_info += " [32-bit]"
             
             dpg.set_value("target_text", process_info)
-            dpg.configure_item("scanner_tab", enabled=True)
-            dpg.configure_item("memory_tab", enabled=True)
-            dpg.configure_item("hexedit_tab", enabled=True)
-            dpg.configure_item("disasm_tab", enabled=True)
-            dpg.configure_item("pointers_tab", enabled=True)
-            dpg.configure_item("injector_tab", enabled=True)
+            dpg.configure_item("scanner_tab", show=False)
+            dpg.configure_item("memory_tab", show=True)
+            dpg.configure_item("hexedit_tab", show=True)
+            dpg.configure_item("disasm_tab", show=True)
+            dpg.configure_item("pointers_tab", show=True)
+            dpg.configure_item("injector_tab", show=True)
         else:
             dpg.set_value("target_text", "Target: None")
-            dpg.configure_item("scanner_tab", enabled=False)
-            dpg.configure_item("memory_tab", enabled=False)
-            dpg.configure_item("hexedit_tab", enabled=False)
-            dpg.configure_item("disasm_tab", enabled=False)
-            dpg.configure_item("pointers_tab", enabled=False)
-            dpg.configure_item("injector_tab", enabled=False)
-        
+            dpg.configure_item("scanner_tab", show=False)
+            dpg.configure_item("memory_tab", show=False)
+            dpg.configure_item("hexedit_tab", show=False)
+            dpg.configure_item("disasm_tab", show=False)
+            dpg.configure_item("pointers_tab", show=False)
+            dpg.configure_item("injector_tab", show=False)
+
         # Update scan controls based on scan type
         scan_type = self.scan_type
         
