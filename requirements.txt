@@ -1,0 +1,30 @@
+# Required dependencies
+dearpygui>=1.9.0
+pywin32>=305
+
+# Optional dependencies for enhanced functionality
+# Uncomment the ones you want to install
+
+# Scientific computing
+# numpy>=1.24.0
+
+# Process management and system utilities
+# psutil>=5.9.0
+
+# PE file analysis
+# pefile>=2023.2.7
+
+# Disassembly
+# capstone>=5.0.0
+
+# Assembly
+# keystone-engine>=0.9.2
+
+# Dynamic instrumentation
+# frida>=16.0.0
+
+# Image processing
+# pillow>=10.0.0
+
+# Keyboard monitoring
+# keyboard>=0.13.5

@@ -2568,7 +2568,7 @@ class MemScanDeluxeUI:
                             dpg.add_button(label="Refresh", callback=self.update_memory_regions)
                             dpg.add_input_text(label="Filter", callback=self.filter_memory_regions, width=150)
                         
-                        dpg.add_table(header_row=True, policy=dpg.mvTable_SizingStretchProp,
+                        with dpg.table(header_row=True, policy=dpg.mvTable_SizingStretchProp,
                                      borders_innerH=True, borders_outerH=True, borders_innerV=True,
                                      borders_outerV=True, tag="regions_table", callback=self.on_region_select):
                             dpg.add_table_column(label="Address")
@@ -2579,7 +2579,7 @@ class MemScanDeluxeUI:
                         with dpg.group(horizontal=True):
                             dpg.add_button(label="Refresh", callback=self.update_modules)
                         
-                        dpg.add_table(header_row=True, policy=dpg.mvTable_SizingStretchProp,
+                        with dpg.table(header_row=True, policy=dpg.mvTable_SizingStretchProp,
                                      borders_innerH=True, borders_outerH=True, borders_innerV=True,
                                      borders_outerV=True, tag="modules_table", callback=self.on_module_select):
                             dpg.add_table_column(label="Name")
@@ -2959,4 +2959,729 @@ class MemScanDeluxeUI:
             return
         
         # Start the scan
-        dpg.set_value("scan
+        dpg.set_value("scan_status", "Scanning memory...")
+        dpg.set_value("scan_progress", 0.0)
+        dpg.configure_item("first_scan_btn", enabled=False)
+        dpg.configure_item("cancel_scan_btn", enabled=True)
+        
+        self.memory_manager.start_memory_scan(
+            self.scan_type, 
+            self.scan_data_type, 
+            value_or_pattern, 
+            comparison_value,
+            self.scan_method
+        )
+    
+    def start_next_scan(self) -> None:
+        """Start a follow-up scan based on previous results."""
+        if not self.memory_manager.target.is_valid():
+            self.show_error("No process selected")
+            return
+        
+        if not self.memory_manager.scan_results:
+            self.show_error("No previous scan results")
+            return
+        
+        # Get scan parameters
+        try:
+            value_or_pattern = None
+            comparison_value = None
+            
+            if self.scan_type in (ScanType.EXACT_VALUE, ScanType.FUZZY, ScanType.PATTERN):
+                value_or_pattern = self.parse_scan_value(self.scan_value, self.scan_data_type)
+            
+            if self.scan_type == ScanType.RANGE:
+                value_or_pattern = self.parse_scan_value(self.scan_value, self.scan_data_type)
+                comparison_value = self.parse_scan_value(self.comparison_value, self.scan_data_type)
+        except ValueError as e:
+            self.show_error(f"Invalid value: {e}")
+            return
+        
+        # Start the scan
+        dpg.set_value("scan_status", "Scanning memory...")
+        dpg.set_value("scan_progress", 0.0)
+        dpg.configure_item("next_scan_btn", enabled=False)
+        dpg.configure_item("cancel_scan_btn", enabled=True)
+        
+        self.memory_manager.start_memory_scan(
+            self.scan_type, 
+            self.scan_data_type, 
+            value_or_pattern, 
+            comparison_value,
+            self.scan_method
+        )
+    
+    def cancel_scan(self) -> None:
+        """Cancel the currently running scan."""
+        self.memory_manager.cancel_scan.set()
+        dpg.set_value("scan_status", "Cancelling scan...")
+        dpg.configure_item("cancel_scan_btn", enabled=False)
+    
+    def update_scan_progress(self, progress: float, status: str) -> None:
+        """Update scan progress in UI."""
+        dpg.set_value("scan_progress", progress)
+        dpg.set_value("scan_status", f"Scanning: {status} ({progress*100:.1f}%)")
+    
+    def scan_completed(self, success: bool, message: str) -> None:
+        """Called when a scan completes."""
+        if success:
+            dpg.set_value("scan_status", message)
+            dpg.set_value("scan_progress", 1.0)
+            
+            # Update results table
+            self.update_results_table()
+            
+            # Enable next scan
+            dpg.configure_item("next_scan_btn", enabled=True)
+        else:
+            dpg.set_value("scan_status", f"Scan failed: {message}")
+            dpg.set_value("scan_progress", 0.0)
+        
+        # Re-enable scan buttons
+        dpg.configure_item("first_scan_btn", enabled=True)
+        dpg.configure_item("next_scan_btn", enabled=len(self.memory_manager.scan_results) > 0)
+        dpg.configure_item("cancel_scan_btn", enabled=False)
+    
+    def update_results_table(self) -> None:
+        """Update the scan results table."""
+        # Clear existing rows
+        if dpg.does_item_exist("results_table"):
+            children = dpg.get_item_children("results_table", 1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
+        else:
+            return
+        
+        # Add rows for each result
+        for i, result in enumerate(self.memory_manager.scan_results[:1000]):  # Limit to first 1000
+            with dpg.table_row(parent="results_table"):
+                dpg.add_text(result.format_address())
+                dpg.add_text(result.data_type.name)
+                dpg.add_text(result.format_value())
+                dpg.add_text("")  # Previous value - would need to track this
+                
+                # Action buttons
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Edit", callback=lambda s, a, r=result: self.edit_result_value(r), width=50)
+                    dpg.add_button(label="Freeze", callback=lambda s, a, r=result: self.toggle_freeze_result(r), width=50)
+    
+    def clear_scan_results(self) -> None:
+        """Clear all scan results."""
+        self.memory_manager.scan_results = []
+        self.memory_manager.previous_scan_results = []
+        self.update_results_table()
+        dpg.set_value("scan_status", "Results cleared")
+        dpg.configure_item("next_scan_btn", enabled=False)
+    
+    def new_scan(self) -> None:
+        """Start a new scan session."""
+        self.clear_scan_results()
+        self.set_tab("scanner")
+    
+    def on_result_select(self, sender, app_data) -> None:
+        """Called when a result is selected in the table."""
+        pass  # Could be used to show details
+    
+    def edit_result_value(self, result: ScanResult) -> None:
+        """Edit a scan result value."""
+        with dpg.window(label=f"Edit Value at {result.format_address()}", modal=True, 
+                       width=400, height=200, pos=(300, 300), tag="edit_value_window"):
+            dpg.add_text(f"Current Value: {result.format_value()}")
+            dpg.add_input_text(label="New Value", tag="edit_value_input", default_value=result.format_value())
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=lambda: self._save_edited_value(result), width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("edit_value_window"), width=80)
+    
+    def _save_edited_value(self, result: ScanResult) -> None:
+        """Save an edited value."""
+        try:
+            new_value_str = dpg.get_value("edit_value_input")
+            new_value = self.parse_scan_value(new_value_str, result.data_type)
+            
+            if self.memory_manager.set_value(result.address, new_value, result.data_type):
+                result.value = new_value
+                self.update_results_table()
+                dpg.delete_item("edit_value_window")
+            else:
+                self.show_error("Failed to write value to memory")
+        except Exception as e:
+            self.show_error(f"Error saving value: {e}")
+    
+    def toggle_freeze_result(self, result: ScanResult) -> None:
+        """Toggle freezing a result value."""
+        self.memory_manager.toggle_freeze_value(result.address, result.value, result.data_type)
+        self.update_results_table()
+    
+    def parse_scan_value(self, value_str: str, data_type: ScanDataType) -> Any:
+        """Parse a scan value string based on data type."""
+        if not value_str:
+            if data_type == ScanDataType.STRING_UTF8 or data_type == ScanDataType.STRING_UTF16:
+                return ""
+            raise ValueError("Value is required")
+        
+        try:
+            if data_type == ScanDataType.BYTE:
+                return int(value_str, 0) & 0xFF
+            elif data_type == ScanDataType.SHORT:
+                return int(value_str, 0) & 0xFFFF
+            elif data_type == ScanDataType.INTEGER:
+                return int(value_str, 0)
+            elif data_type == ScanDataType.LONG:
+                return int(value_str, 0)
+            elif data_type == ScanDataType.FLOAT:
+                return float(value_str)
+            elif data_type == ScanDataType.DOUBLE:
+                return float(value_str)
+            elif data_type == ScanDataType.STRING_UTF8:
+                return value_str
+            elif data_type == ScanDataType.STRING_UTF16:
+                return value_str
+            elif data_type == ScanDataType.AOB:
+                return value_str  # Pattern string
+            elif data_type == ScanDataType.POINTER:
+                return int(value_str, 0)
+            else:
+                raise ValueError(f"Unsupported data type: {data_type}")
+        except Exception as e:
+            raise ValueError(f"Failed to parse value '{value_str}': {e}")
+    
+    def set_scan_type(self, sender, value) -> None:
+        """Set the scan type."""
+        self.scan_type = ScanType[value]
+        self.update_ui()
+    
+    def set_scan_data_type(self, sender, value) -> None:
+        """Set the scan data type."""
+        self.scan_data_type = ScanDataType[value]
+    
+    def set_scan_method(self, sender, value) -> None:
+        """Set the scan method."""
+        self.scan_method = ScanMethod[value]
+    
+    # Memory browser callbacks
+    def update_memory_regions(self) -> None:
+        """Update the memory regions table."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        self.memory_manager.refresh_memory_regions()
+        
+        # Clear existing rows
+        if dpg.does_item_exist("regions_table"):
+            children = dpg.get_item_children("regions_table", 1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
+        
+        # Add rows for each region
+        for region in self.memory_manager.target.regions[:500]:  # Limit to first 500
+            with dpg.table_row(parent="regions_table"):
+                dpg.add_text(region.format_address())
+                dpg.add_text(region.format_size())
+                dpg.add_text(region.format_protection())
+    
+    def update_modules(self) -> None:
+        """Update the modules table."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        self.memory_manager._refresh_process_modules()
+        
+        # Clear existing rows
+        if dpg.does_item_exist("modules_table"):
+            children = dpg.get_item_children("modules_table", 1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
+        
+        # Add rows for each module
+        for name, (base, size) in self.memory_manager.target.modules.items():
+            with dpg.table_row(parent="modules_table"):
+                dpg.add_text(name)
+                dpg.add_text(f"0x{base:016X}")
+                dpg.add_text(f"{size / 1024:.1f} KB")
+    
+    def filter_memory_regions(self, sender, value) -> None:
+        """Filter memory regions."""
+        self.current_region_filter = value
+        # Would filter the display
+    
+    def on_region_select(self, sender, app_data) -> None:
+        """Called when a memory region is selected."""
+        pass
+    
+    def on_module_select(self, sender, app_data) -> None:
+        """Called when a module is selected."""
+        pass
+    
+    def set_memory_address(self, sender, value) -> None:
+        """Set the memory address to view."""
+        try:
+            self.hex_editor_address = int(value, 0)
+        except:
+            pass
+    
+    def goto_memory_address(self) -> None:
+        """Go to a specific memory address."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        address = self.hex_editor_address
+        # Read memory at this address
+        data = self.memory_manager.read_memory(address, 256)
+        
+        if data:
+            # Format and display
+            formatted = self._format_memory_view(address, data)
+            dpg.set_value("memory_content", formatted)
+        else:
+            dpg.set_value("memory_content", "Failed to read memory at this address")
+    
+    def navigate_memory(self, direction: int) -> None:
+        """Navigate memory forward or backward."""
+        self.hex_editor_address += direction * 256
+        self.goto_memory_address()
+    
+    def _format_memory_view(self, address: int, data: bytes) -> str:
+        """Format memory data for display."""
+        lines = []
+        for i in range(0, len(data), 16):
+            # Address
+            line = f"0x{address + i:016X}: "
+            
+            # Hex bytes
+            hex_part = ""
+            ascii_part = ""
+            for j in range(16):
+                if i + j < len(data):
+                    byte = data[i + j]
+                    hex_part += f"{byte:02X} "
+                    ascii_part += chr(byte) if 32 <= byte < 127 else "."
+                else:
+                    hex_part += "   "
+            
+            line += hex_part + "  " + ascii_part
+            lines.append(line)
+        
+        return "\n".join(lines)
+    
+    # Hex editor callbacks
+    def set_hex_editor_address(self, sender, value) -> None:
+        """Set hex editor address."""
+        try:
+            self.hex_editor_address = int(value, 0)
+        except:
+            pass
+    
+    def load_hex_editor_data(self) -> None:
+        """Load data into hex editor."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        size = dpg.get_value("hex_editor_size")
+        data = self.memory_manager.read_memory(self.hex_editor_address, size)
+        
+        if data:
+            self.hex_editor_data = data
+            self._update_hex_editor_display()
+        else:
+            self.show_error("Failed to read memory")
+    
+    def _update_hex_editor_display(self) -> None:
+        """Update hex editor display."""
+        # Clear existing rows
+        if dpg.does_item_exist("hex_editor_table"):
+            children = dpg.get_item_children("hex_editor_table", 1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
+        
+        # Add rows
+        for i in range(0, len(self.hex_editor_data), 16):
+            with dpg.table_row(parent="hex_editor_table"):
+                dpg.add_text(f"{i:08X}")
+                
+                # Hex values
+                for j in range(16):
+                    if i + j < len(self.hex_editor_data):
+                        dpg.add_input_text(default_value=f"{self.hex_editor_data[i+j]:02X}", 
+                                         width=30, no_spaces=True)
+                    else:
+                        dpg.add_text("")
+                
+                # ASCII representation
+                ascii_str = ""
+                for j in range(16):
+                    if i + j < len(self.hex_editor_data):
+                        byte = self.hex_editor_data[i + j]
+                        ascii_str += chr(byte) if 32 <= byte < 127 else "."
+                dpg.add_text(ascii_str)
+    
+    def save_hex_editor_changes(self) -> None:
+        """Save changes from hex editor to memory."""
+        # Would need to collect edited values and write back
+        self.show_error("Not implemented yet")
+    
+    # Disassembler callbacks
+    def set_disasm_address(self, sender, value) -> None:
+        """Set disassembly address."""
+        try:
+            self.asm_editor_address = int(value, 0)
+        except:
+            pass
+    
+    def disassemble_code(self) -> None:
+        """Disassemble code at address."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        if not _have_capstone:
+            self.show_error("Capstone disassembler not available")
+            return
+        
+        count = dpg.get_value("disasm_count")
+        instructions = self.memory_manager.disassemble(self.asm_editor_address, count * 15)
+        
+        # Clear existing rows
+        if dpg.does_item_exist("disasm_table"):
+            children = dpg.get_item_children("disasm_table", 1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
+        
+        # Add rows for each instruction
+        for addr, mnemonic, op_str in instructions[:count]:
+            with dpg.table_row(parent="disasm_table"):
+                dpg.add_text(f"0x{addr:016X}")
+                dpg.add_text("")  # Bytes would go here
+                dpg.add_text(f"{mnemonic} {op_str}")
+                dpg.add_button(label="Edit", width=50)
+    
+    # Pointer scanner callbacks
+    def set_pointer_target(self, sender, value) -> None:
+        """Set pointer scan target address."""
+        pass
+    
+    def scan_pointers(self) -> None:
+        """Scan for pointers."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        try:
+            target_address = int(dpg.get_value("pointer_target_address"), 0)
+            max_level = dpg.get_value("pointer_max_level")
+            max_offset = dpg.get_value("pointer_max_offset")
+            max_results = dpg.get_value("pointer_max_results")
+            
+            # This would be a long operation - should be in a thread
+            results = self.memory_manager.search_pointers(target_address, max_level, max_offset, max_results)
+            
+            # Update table
+            if dpg.does_item_exist("pointer_results_table"):
+                children = dpg.get_item_children("pointer_results_table", 1)
+                if children:
+                    for child in children:
+                        dpg.delete_item(child)
+            
+            for chain in results:
+                with dpg.table_row(parent="pointer_results_table"):
+                    if chain:
+                        dpg.add_text(f"0x{chain[0]:016X}")
+                        offsets = " + ".join([f"0x{abs(chain[i] - chain[i+1]):X}" for i in range(len(chain)-1)])
+                        dpg.add_text(offsets)
+                        dpg.add_text(" -> ".join([f"0x{addr:X}" for addr in chain]))
+                        dpg.add_button(label="Add", width=50)
+        
+        except Exception as e:
+            self.show_error(f"Pointer scan error: {e}")
+    
+    # Injector callbacks
+    def set_inject_address(self, sender, value) -> None:
+        """Set injection address."""
+        pass
+    
+    def allocate_process_memory(self) -> None:
+        """Allocate memory in target process."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        size = 4096  # Default 4KB
+        addr = self.memory_manager.allocate_memory(size)
+        
+        if addr:
+            dpg.set_value("inject_address", f"0x{addr:016X}")
+            dpg.set_value("status_bar", f"Allocated {size} bytes at 0x{addr:016X}")
+        else:
+            self.show_error("Failed to allocate memory")
+    
+    def set_inject_mode(self, sender, value) -> None:
+        """Set injection mode."""
+        pass
+    
+    def inject_code(self) -> None:
+        """Inject code into process."""
+        if not self.memory_manager.target.is_valid():
+            return
+        
+        try:
+            address = int(dpg.get_value("inject_address"), 0)
+            code_str = dpg.get_value("inject_code_input")
+            mode = dpg.get_value("inject_mode")
+            
+            if mode == "Assembly":
+                # Assemble code
+                if not _have_keystone:
+                    self.show_error("Keystone assembler not available")
+                    return
+                
+                code = self.memory_manager.assemble(code_str)
+                if not code:
+                    self.show_error("Failed to assemble code")
+                    return
+            elif mode == "Shellcode":
+                # Parse hex shellcode
+                code_str = code_str.replace(" ", "").replace("\\x", "")
+                code = bytes.fromhex(code_str)
+            else:
+                self.show_error("DLL injection not implemented")
+                return
+            
+            # Inject
+            if self.memory_manager.inject_code(address, code):
+                dpg.set_value("status_bar", f"Injected {len(code)} bytes at 0x{address:016X}")
+            else:
+                self.show_error("Failed to inject code")
+        
+        except Exception as e:
+            self.show_error(f"Injection error: {e}")
+    
+    # Utility methods
+    def show_error(self, message: str) -> None:
+        """Show an error message dialog."""
+        with dpg.window(label="Error", modal=True, width=400, height=150, pos=(400, 300)):
+            dpg.add_text(message, wrap=380)
+            dpg.add_separator()
+            dpg.add_button(label="OK", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+    
+    def show_about(self) -> None:
+        """Show about dialog."""
+        about_text = f"""MemScan Deluxe v{VERSION}
+
+A professional-grade memory manipulation tool with military-level 
+scanning capabilities and a user-friendly interface.
+
+Features:
+- Advanced memory scanning
+- Memory editing and freezing
+- Pointer scanning
+- Disassembler and assembler
+- Code injection
+- Anti-detection mechanisms
+
+Requirements:
+- dearpygui
+- pywin32
+- numpy (optional)
+- psutil (optional)
+- capstone (optional)
+- keystone-engine (optional)
+"""
+        with dpg.window(label="About MemScan Deluxe", modal=True, width=500, height=400, pos=(350, 200)):
+            dpg.add_text(about_text, wrap=480)
+            dpg.add_separator()
+            dpg.add_button(label="Close", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+    
+    def show_docs(self) -> None:
+        """Show documentation."""
+        docs_text = """MemScan Deluxe Documentation
+
+Quick Start:
+1. Click 'Process' tab and select a target process
+2. Click 'Attach' to attach to the process
+3. Go to 'Scanner' tab
+4. Choose scan type and data type
+5. Enter a value to search for
+6. Click 'First Scan' to start scanning
+7. Change the value in the target application
+8. Click 'Next Scan' to narrow down results
+9. Right-click results to edit or freeze values
+
+Advanced Features:
+- Memory Browser: Browse process memory regions
+- Hex Editor: Edit memory in hexadecimal format
+- Disassembler: View assembly code
+- Pointer Scanner: Find pointer chains
+- Injector: Inject code into the process
+
+Keyboard Shortcuts:
+- F5: Refresh process list
+- Ctrl+F: Start scan (when implemented)
+- Ctrl+Space: Toggle freeze (when implemented)
+"""
+        with dpg.window(label="Documentation", modal=True, width=600, height=500, pos=(300, 150)):
+            dpg.add_text(docs_text, wrap=580)
+            dpg.add_separator()
+            dpg.add_button(label="Close", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+    
+    def show_scan_settings(self) -> None:
+        """Show scan settings dialog."""
+        with dpg.window(label="Scan Settings", modal=True, width=500, height=400, pos=(350, 200)):
+            dpg.add_slider_int(label="Scan Threads", default_value=self.config.scan_threads, 
+                             min_value=1, max_value=16, tag="settings_scan_threads")
+            dpg.add_combo(label="Anti-Detection Level", 
+                         items=[d.name for d in DetectionLevel],
+                         default_value=self.config.anti_detection_level.name,
+                         tag="settings_detection_level")
+            dpg.add_input_int(label="Max Results", default_value=self.config.max_scan_results,
+                            tag="settings_max_results")
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=self._save_scan_settings, width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+    
+    def _save_scan_settings(self) -> None:
+        """Save scan settings."""
+        self.config.scan_threads = dpg.get_value("settings_scan_threads")
+        self.config.anti_detection_level = DetectionLevel[dpg.get_value("settings_detection_level")]
+        self.config.max_scan_results = dpg.get_value("settings_max_results")
+        dpg.delete_item(dpg.last_container())
+    
+    def show_options(self) -> None:
+        """Show options dialog."""
+        with dpg.window(label="Options", modal=True, width=500, height=400, pos=(350, 200)):
+            dpg.add_checkbox(label="Use Dark Theme", default_value=self.config.use_dark_theme)
+            dpg.add_checkbox(label="Show System Processes", default_value=self.config.show_system_processes)
+            dpg.add_checkbox(label="Enable GPU Acceleration", default_value=self.config.enable_gpu_acceleration)
+            dpg.add_slider_float(label="Auto Refresh Interval", default_value=self.config.auto_refresh_interval,
+                               min_value=0.1, max_value=5.0)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=lambda: [self.save_config(), dpg.delete_item(dpg.last_container())], width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+    
+    def show_process_selector(self) -> None:
+        """Show process selector dialog."""
+        self.refresh_process_list()
+    
+    def save_scan_results(self) -> None:
+        """Save scan results to file."""
+        try:
+            os.makedirs(self.config.save_path, exist_ok=True)
+            filename = os.path.join(self.config.save_path, 
+                                   f"scan_{time.strftime('%Y%m%d_%H%M%S')}.json")
+            
+            results_data = []
+            for result in self.memory_manager.scan_results:
+                results_data.append({
+                    'address': result.address,
+                    'value': str(result.value),
+                    'data_type': result.data_type.name,
+                    'size': result.size
+                })
+            
+            with open(filename, 'w') as f:
+                json.dump(results_data, f, indent=2)
+            
+            dpg.set_value("status_bar", f"Saved {len(results_data)} results to {filename}")
+        except Exception as e:
+            self.show_error(f"Failed to save results: {e}")
+    
+    def load_scan_results(self) -> None:
+        """Load scan results from file."""
+        self.show_error("Load results not implemented yet")
+    
+    def clear_logs(self) -> None:
+        """Clear log window."""
+        dpg.set_value("log_content", "")
+    
+    def confirm_action(self, message: str, callback) -> None:
+        """Show confirmation dialog."""
+        with dpg.window(label="Confirm", modal=True, width=400, height=150, pos=(400, 300)):
+            dpg.add_text(message, wrap=380)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Yes", callback=lambda: [callback(), dpg.delete_item(dpg.last_container())], width=80)
+                dpg.add_button(label="No", callback=lambda: dpg.delete_item(dpg.last_container()), width=80)
+
+
+# =============================================================
+# Main Entry Point
+# =============================================================
+def main():
+    """Main entry point for the application."""
+    print(f"Starting {VIEWPORT_TITLE} v{VERSION}")
+    print("=" * 60)
+    
+    # Check for required dependencies
+    missing_deps = []
+    if not _have_pywin32:
+        missing_deps.append("pywin32")
+    
+    if missing_deps:
+        print("WARNING: Missing optional dependencies:")
+        for dep in missing_deps:
+            print(f"  - {dep}")
+        print("\nSome features may not be available.")
+        print("Install with: pip install " + " ".join(missing_deps))
+        print()
+    
+    # Check for optional dependencies
+    optional_deps = {
+        "numpy": _have_numpy,
+        "psutil": _have_psutil,
+        "capstone": _have_capstone,
+        "keystone-engine": _have_keystone,
+        "frida": _have_frida,
+        "PIL": _have_pil,
+        "keyboard": _have_keyboard
+    }
+    
+    missing_optional = [name for name, available in optional_deps.items() if not available]
+    if missing_optional:
+        print("Optional dependencies not installed:")
+        for dep in missing_optional:
+            print(f"  - {dep}")
+        print("\nInstall all optional dependencies with:")
+        print("  pip install numpy psutil capstone keystone-engine frida pillow keyboard")
+        print()
+    
+    # Check if running on Windows
+    if not sys.platform.startswith('win'):
+        print("ERROR: This application requires Windows to function properly.")
+        print("Many features rely on Windows-specific APIs.")
+        return 1
+    
+    # Check if running with admin privileges
+    try:
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+        if not is_admin:
+            print("WARNING: Not running with administrator privileges.")
+            print("Some processes may not be accessible.")
+            print("Consider running as administrator for full functionality.")
+            print()
+    except:
+        pass
+    
+    print("Starting GUI...")
+    print()
+    
+    try:
+        # Create and run the application
+        app = MemScanDeluxeUI()
+        app.run()
+        return 0
+    
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        return 0
+    
+    except Exception as e:
+        print(f"\nFATAL ERROR: {e}")
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
